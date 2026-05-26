@@ -1,4 +1,3 @@
-
 import torch
 from typing import Any, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass
@@ -21,14 +20,12 @@ class Qwen3VLForVaCoT(Qwen3VLForConditionalGeneration):
         self.captured_attentions = []
 
         self.vision_aware_heads = {}
-        self.core_semantic_indices = [] 
         
         self.last_t_mas_score = 0.0 
         self._register_intervention_hooks()
         self.cooldown_steps = 0
 
-        self.t_mas_history = []
-        self.vacc_heatmaps = []
+        
 
         self.t_mas_threshold = 25 
         self.ema_alpha = 0.07
@@ -36,7 +33,6 @@ class Qwen3VLForVaCoT(Qwen3VLForConditionalGeneration):
         self.ema_mean = 0.0
         self.ema_var = 0.0
         self.is_ema_init = False
-        self.t_mas_threshold_history = []
         
         self.is_hunting_peak = False
         self.peak_score = 0.0 
@@ -270,9 +266,6 @@ class Qwen3VLForVaCoT(Qwen3VLForConditionalGeneration):
                 self.is_ema_init = False
                 self.t_mas_threshold = 25.0
 
-                self.apply_downscale = False
-                self.apply_vhr = False
-                self.core_semantic_indices = []
                 self.vision_aware_heads = {}
                 self.last_t_mas_score = 0.0
 
@@ -333,9 +326,6 @@ class Qwen3VLForVaCoT(Qwen3VLForConditionalGeneration):
                                                                                       dim=1)
             valid_image_attentions = va_attentions[self.query_image_mask]
             
-            self.vacc_heatmaps.append({
-                'step': len(self.t_mas_history) - 1, 
-            })
             spatial_merge_size = getattr(self.config.vision_config, "spatial_merge_size", 2)
             grid_h = image_grid_thw[-1, 1].item() // spatial_merge_size
             grid_w = image_grid_thw[-1, 2].item() // spatial_merge_size
@@ -343,32 +333,7 @@ class Qwen3VLForVaCoT(Qwen3VLForConditionalGeneration):
             attentions_1d = valid_image_attentions.squeeze()
             
             indices_list, r_min, r_max, c_min, c_max = self._get_dynamic_semantic_bbox(attentions_1d, grid_h, grid_w)
-            box_h = r_max - r_min + 1
-            box_w = c_max - c_min + 1
-
-            attn_2d = attentions_1d.view(grid_h, grid_w).cpu().float().numpy()
             
-            fig, ax = plt.subplots(1, figsize=(8, 6))
-            cax = ax.imshow(attn_2d, cmap='jet')
-            fig.colorbar(cax)
-            
-            rect = patches.Rectangle(
-                (c_min - 0.5, r_min - 0.5), 
-                box_w, 
-                box_h, 
-                linewidth=2, 
-                edgecolor='red', 
-                facecolor='none'
-            )
-            ax.add_patch(rect)
-            
-            save_dir = './results/debug_bbox/'
-            os.makedirs(save_dir, exist_ok=True)
-            save_path = os.path.join(save_dir, f'bbox_step_{self.num_sub_imgs}.png')
-            
-            plt.title(f"Dynamic BBox: {box_h}x{box_w} tokens")
-            plt.savefig(save_path, bbox_inches='tight')
-            plt.close()
             indices = torch.tensor(indices_list, device=valid_image_attentions.device)
             sampled_reasoning_embeds = self.reasoning_img_embeds[indices]
             
@@ -393,7 +358,6 @@ class Qwen3VLForVaCoT(Qwen3VLForConditionalGeneration):
             self.num_sub_imgs += 2
             self.cooldown_steps = 4
             
-            self.apply_vhr = False
             
         outputs = self.model(
             input_ids=None,
@@ -407,7 +371,6 @@ class Qwen3VLForVaCoT(Qwen3VLForConditionalGeneration):
             return_dict=return_dict,
             cache_position=cache_position,
         )
-        self.apply_vhr = False
         if outputs.attentions is not None and len(self.vision_aware_heads) > 0:
             t_mas_score = 0.0
             total_dangerous_heads = 0 
@@ -425,17 +388,9 @@ class Qwen3VLForVaCoT(Qwen3VLForConditionalGeneration):
                 seq_len = outputs.attentions[layer_idx].shape[-1]
                 
                 img_attn = layer_attn_heads[..., start_idx:end_idx]
-                if self.core_semantic_indices:
-                    valid_cores = [i for i in self.core_semantic_indices if i < seq_len]
-                    core_attn = layer_attn_heads[..., valid_cores] if valid_cores else torch.zeros_like(img_attn[..., :1])
-                else:
-                    core_attn = torch.zeros_like(img_attn[..., :1])
-                
 
                 head_mas_scores = img_attn.sum(dim=-1)
-                head_core_scores = core_attn.sum(dim=-1)
 
-                head_useful_scores = head_mas_scores + head_core_scores
                 t_mas_score += torch.topk(head_mas_scores, min(k, head_mas_scores.shape[-1]), dim=-1)[0].sum().item()
 
                     
@@ -475,10 +430,6 @@ class Qwen3VLForVaCoT(Qwen3VLForConditionalGeneration):
             self.last_t_mas_score = 0
             hidden_states = outputs[0]
             logits = self.lm_head(hidden_states)
-
-        self.t_mas_history.append(self.last_t_mas_score)
-        self.t_mas_threshold_history.append(getattr(self, 't_mas_threshold', 25.0))
-        
 
         loss = None
         if labels is not None:
