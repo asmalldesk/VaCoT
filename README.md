@@ -41,13 +41,15 @@ VaCoT/
 ├── figures/
 │   └── gig2_2.png
 └── results/
-
+```
 ## Installation
 Install the required packages:
-```text
+```bash
 conda create -n vacot python=3.12
 conda activate vacot
 pip install -r requirements.txt
-
+```
 ## Start
+```bash
 python vacot_run.py
+```
